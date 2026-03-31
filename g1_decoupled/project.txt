@@ -1,0 +1,7 @@
+i want to do a major project here ,
+first setup training enviromet for lower body stabilty and uppe body IL as  in HumanPLUS but for g1,
+ihave traiing data from twist2 ,
+i can use that ,
+
+and also assets from twist2 , i can also use that a;so the codebases of twiat2 and humanplus ,
+with these as references i want to create a new traiing environment for g1,
