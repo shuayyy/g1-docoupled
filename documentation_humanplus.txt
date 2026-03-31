@@ -1,0 +1,62 @@
+HumanPlus HST H1 rewards: implemented vs active
+
+Implemented reward functions in code:
+- _reward_lin_vel_z
+- _reward_ang_vel_xy
+- _reward_orientation
+- _reward_base_height
+- _reward_torques
+- _reward_dof_vel
+- _reward_dof_acc
+- _reward_action_rate
+- _reward_collision
+- _reward_termination
+- _reward_dof_pos_limits
+- _reward_dof_vel_limits
+- _reward_torque_limits
+- _reward_tracking_lin_vel
+- _reward_tracking_ang_vel
+- _reward_feet_air_time
+- _reward_stumble
+- _reward_stand_still
+- _reward_feet_contact_forces
+- _reward_target_jt
+
+Important:
+Implemented does not mean active.
+
+In HumanPlus H1, rewards become active only if their scale in class rewards.scales is nonzero.
+Zero-scale rewards are removed in:
+humanplus/HST/legged_gym/legged_gym/envs/h1/h1.py:700
+
+Active rewards in practice:
+- tracking_lin_vel
+  humanplus/HST/legged_gym/legged_gym/envs/h1/h1_config.py:160
+- tracking_ang_vel
+  humanplus/HST/legged_gym/legged_gym/envs/h1/h1_config.py:161
+- target_jt
+  humanplus/HST/legged_gym/legged_gym/envs/h1/h1_config.py:175
+
+Not active in practice because their scale is 0, 0., or -0.0:
+- termination
+- lin_vel_z
+- ang_vel_xy
+- orientation
+- torques
+- dof_vel
+- dof_acc
+- base_height
+- feet_air_time
+- collision
+- feet_stumble
+- action_rate
+- stand_still
+- dof_pos_limits
+
+Implemented but not listed in active scales:
+- dof_vel_limits
+- torque_limits
+- feet_contact_forces
+
+Short answer:
+Only tracking_lin_vel, tracking_ang_vel, and target_jt are active right now.

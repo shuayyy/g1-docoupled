@@ -1,2 +1,16 @@
-twist2/
+TWIST2/
 humanplus/
+.vscode/
+g1_decoupled/project.txt
+g1_decoupled/README.md
+.codex
+
+# Python build/runtime artifacts
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+
+# Training/runtime outputs
+# g1_decoupled/RL_transformer/legged_gym/logs/
+g1_decoupled/RL_transformer/legged_gym/wandb/

@@ -1,0 +1,993 @@
+Recent edits made during the IL_transformer G1 migration audit
+=============================================================
+
+Scope
+-----
+This note records the changes made while getting the G1 task in:
+
+/home/shuaiyyy/humanoids_repo/g1_docoupled/g1_decoupled/IL_transformer
+
+to a state where the environment can be imported and initialized far enough
+to expose real G1-specific runtime issues.
+
+The goal of these edits was not to redesign the algorithm. The goal was to:
+
+1. make the copied G1 environment callable by the existing IL_transformer framework,
+2. remove stale H1-only wiring that blocked imports,
+3. align config/runtime assumptions enough to run test_env.py,
+4. push the runtime failure point from generic framework errors to the first real
+   G1 data mismatch.
+
+
+High-level result
+-----------------
+At the end of this audit:
+
+1. Python files under IL_transformer parse successfully.
+2. The G1 task is registered and can be selected by task name.
+3. test_env.py --task g1 --headless gets through:
+   - Isaac Gym import,
+   - task import/registration,
+   - environment construction,
+   - terrain generation,
+   - asset loading,
+   - contact index creation,
+   - buffer initialization.
+4. The current failure is now the trajectory data shape:
+   - configured motion file has shape (77, 19),
+   - G1 expects 29 DOFs.
+
+This means the remaining blocker is no longer generic code plumbing. It is now a
+G1 trajectory/data compatibility problem.
+
+
+1. Changes in g1.py
+-------------------
+File:
+/home/shuaiyyy/humanoids_repo/g1_docoupled/g1_decoupled/IL_transformer/legged_gym/legged_gym/envs/g1/g1.py
+
+1.1 Indentation fix: copied methods were nested inside __init__
+---------------------------------------------------------------
+Problem:
+The block copied from h1.py was pasted at the wrong indentation level. Python
+accepted it syntactically, but all copied defs became local functions inside
+G1.__init__ instead of actual class methods.
+
+Symptoms:
+- self._super_init(...)
+- self._init_buffers(...)
+- self._prepare_reward_function(...)
+
+would fail at runtime because those attributes would not exist on the object.
+
+Fix:
+The copied functions were unindented so they became real methods of class G1.
+
+Why this mattered:
+This was the first structural issue. Without it, the environment could not be
+constructed at all.
+
+
+1.2 Added inline comments around the startup buffer allocations
+---------------------------------------------------------------
+The following buffers were annotated for reference:
+- obs_buf
+- rew_buf
+- reset_buf
+- episode_length_buf
+- time_out_buf
+- privileged_obs_buf
+- obs_history_buf
+- action_history_buf
+- extras
+
+This did not change behavior. It was purely documentation.
+
+
+1.3 Fixed startup device parsing in _super_init
+-----------------------------------------------
+Problem:
+The copied _super_init() in g1.py expected sim_device to be an object with a
+.type field:
+
+    if sim_device.type == 'cuda' and sim_params.use_gpu_pipeline:
+
+But task_registry passes sim_device as a string like:
+- "cuda:0"
+- "cpu"
+
+This caused:
+AttributeError: 'str' object has no attribute 'type'
+
+Fix:
+Imported gymutil and used the standard Isaac Gym parsing path:
+
+    from isaacgym import gymapi, gymtorch, gymutil
+
+    sim_device_type, self.sim_device_id = gymutil.parse_device_str(self.sim_device)
+
+    if sim_device_type == 'cuda' and sim_params.use_gpu_pipeline:
+        self.device = self.sim_device
+    else:
+        self.device = 'cpu'
+
+Why this mattered:
+The rest of g1.py already assumes:
+- self.sim_device_id exists,
+- self.device is either a string "cpu" or a sim device string like "cuda:0".
+
+So this one fix restored consistency with the rest of the file and with the
+base task behavior.
+
+
+1.4 Imported gymutil explicitly
+-------------------------------
+Problem:
+Later parts of g1.py use:
+- gymutil.WireframeSphereGeometry
+- gymutil.draw_lines
+
+but gymutil was not imported.
+
+Fix:
+Added:
+
+    from isaacgym import gymapi, gymtorch, gymutil
+
+Why this mattered:
+Even if early execution did not reach the debug visualization path yet, this was
+an obvious future runtime error in the copied file.
+
+
+1.5 Verified current target_jt logic is whole-body
+--------------------------------------------------
+This was not changed, but it was checked during the audit.
+
+Current behavior:
+- _init_target_jt asserts trajectory dimension equals self.num_dofs.
+- delayed_obs_target_jt is appended as a full vector to observations.
+- _reward_target_jt compares self.dof_pos against self.target_jt across all DOFs.
+
+So the current copied G1 logic is whole-body joint tracking, not upper-body-only
+tracking.
+
+
+2. Changes in g1_config.py
+--------------------------
+File:
+/home/shuaiyyy/humanoids_repo/g1_docoupled/g1_decoupled/IL_transformer/legged_gym/legged_gym/envs/g1/g1_config.py
+
+2.1 Fixed asset file path for this repo layout
+----------------------------------------------
+Problem:
+The original copied path assumed a different repo structure.
+
+Fix:
+Asset path was set to:
+
+    file = '{LEGGED_GYM_ROOT_DIR}/../../assets/g1/g1_custom_collision_29dof.urdf'
+
+and asset name kept as:
+
+    name = 'g1'
+
+Why this mattered:
+In this repo, the actual asset lives under:
+
+/home/shuaiyyy/humanoids_repo/g1_docoupled/g1_decoupled/assets/g1/
+
+So the G1 asset path had to be relative to IL_transformer/legged_gym.
+
+
+2.2 Removed class-scope f-string dependence on LEGGED_GYM_ROOT_DIR
+-------------------------------------------------------------------
+Problem:
+At one point the asset file line was written as a class-body f-string using
+LEGGED_GYM_ROOT_DIR directly:
+
+    file = f'{LEGGED_GYM_ROOT_DIR}/...'
+
+At class definition time that symbol was not in scope there, which caused:
+
+    NameError: name 'LEGGED_GYM_ROOT_DIR' is not defined
+
+Fix:
+Changed back to the standard format-string placeholder style:
+
+    file = '{LEGGED_GYM_ROOT_DIR}/../../assets/g1/g1_custom_collision_29dof.urdf'
+
+Why this mattered:
+g1.py already formats the string later with:
+
+    self.cfg.asset.file.format(LEGGED_GYM_ROOT_DIR=LEGGED_GYM_ROOT_DIR)
+
+so the config should store the placeholder string, not evaluate it early.
+
+
+2.3 Set foot_name to match the G1 URDF
+--------------------------------------
+Problem:
+At one point foot_name had been set to "None".
+That would break rigid body matching for feet/contact indexing.
+
+Fix:
+Set:
+
+    foot_name = 'ankle_roll_link'
+
+Why this mattered:
+The G1 URDF contains:
+- left_ankle_roll_link
+- right_ankle_roll_link
+
+and g1.py matches by substring when building feet_indices.
+
+
+2.4 Observation size aligned to the copied H1-style observation builder
+-----------------------------------------------------------------------
+Problem:
+compute_observations() in g1.py builds:
+- roll/pitch orientation (2)
+- base angular velocity (3)
+- commands[:3] (3)
+- dof_pos offset (num_dofs)
+- dof_vel (num_dofs)
+- actions (num_dofs)
+- delayed target_jt (num_dofs)
+
+For 29 DOFs that totals:
+8 + 4 * 29 = 124
+
+But config still had a simpler older value before alignment.
+
+Fix:
+Set:
+
+    num_observations = 8 + 4 * num_dofs
+
+Why this mattered:
+Without this, observation buffers and policy input dimensions would not match
+what g1.py actually constructs.
+
+
+2.5 Added missing normalization fields used directly by g1.py
+-------------------------------------------------------------
+Problem:
+g1.py uses:
+- self.obs_scales.orn
+- self.obs_scales.ang_vel
+- self.obs_scales.dof_pos
+- self.obs_scales.dof_vel
+- self.commands_scale
+
+Those fields were not fully aligned in the copied config.
+
+Fix:
+Added/confirmed in normalization:
+
+    class obs_scales:
+        orn = 1.0
+        ang_vel = 0.25
+        dof_pos = 1.0
+        dof_vel = 0.05
+        imu = 0.5
+
+    commands_scale = [1., 1., 1., 1.]
+    clip_actions = 5.0
+
+Why this mattered:
+These values are read directly during observation construction and noise scaling.
+
+
+2.6 Ensured control.clip_actions is present for g1.py torque logic
+------------------------------------------------------------------
+Problem:
+In base legged_robot.py, action clipping is usually handled via
+normalization.clip_actions.
+
+But your copied g1.py also contains:
+
+    if self.cfg.control.clip_actions:
+        target_dof_pos = torch.clip(...)
+
+So the control block needed this boolean field.
+
+Fix:
+Kept:
+
+    clip_actions = True
+
+inside class control.
+
+Why this mattered:
+Without it, _compute_torques() would raise an attribute error.
+
+
+2.7 Added missing base-state fields in init_state
+-------------------------------------------------
+Problem:
+g1.py builds the actor base state with:
+
+    self.cfg.init_state.pos
+    self.cfg.init_state.rot
+    self.cfg.init_state.lin_vel
+    self.cfg.init_state.ang_vel
+
+But your G1 init_state only defined pos and default_joint_angles.
+
+This caused:
+AttributeError: 'init_state' object has no attribute 'rot'
+
+Fix:
+Added:
+
+    rot = [0.0, 0.0, 0.0, 1.0]
+    lin_vel = [0.0, 0.0, 0.0]
+    ang_vel = [0.0, 0.0, 0.0]
+
+Why this mattered:
+This is standard actor-root state initialization and is required by the copied
+environment code.
+
+
+2.8 Added missing noise_scales.orn
+----------------------------------
+Problem:
+g1.py noise builder uses:
+
+    noise_scales.orn
+
+but your G1 noise config did not define it.
+
+This caused:
+AttributeError: 'noise_scales' object has no attribute 'orn'
+
+Fix:
+Added:
+
+    orn = 0.05
+
+Why this mattered:
+The copied observation structure uses roll/pitch orientation in the observation,
+so the noise vector builder expects an orientation noise scale.
+
+
+3. Changes in envs/__init__.py
+------------------------------
+File:
+/home/shuaiyyy/humanoids_repo/g1_docoupled/g1_decoupled/IL_transformer/legged_gym/legged_gym/envs/__init__.py
+
+3.1 Simplified task imports/registration to what exists in this checkout
+-------------------------------------------------------------------------
+Problem:
+This checkout did not contain all of the originally referenced environments,
+and stale imports would fail during:
+
+    from legged_gym.envs import *
+
+Fix:
+Kept the active import/registration path focused on:
+- G1
+- G1RoughCfg
+- G1RoughCfgPPO
+- task_registry.register("g1", ...)
+
+Old unrelated imports/registrations were commented out instead of being removed,
+per your preference to preserve edit history inline.
+
+Why this mattered:
+This allowed the package import chain to succeed and made task selection by
+`--task g1` possible.
+
+
+3.2 Corrected duplicate G1 config import
+----------------------------------------
+There had also been a duplicated import entry:
+
+    from .g1.g1_config import G1RoughCfg, G1RoughCfg, G1RoughCfgPPO
+
+This was corrected so the live import is clean.
+
+
+4. Changes in task_registry.py
+------------------------------
+File:
+/home/shuaiyyy/humanoids_repo/g1_docoupled/g1_decoupled/IL_transformer/legged_gym/legged_gym/utils/task_registry.py
+
+4.1 Removed hardcoded H1 resume/config loading assumptions
+----------------------------------------------------------
+Problem:
+The task registry had H1-specific resume/config loading behavior. That would not
+work correctly for G1 logs.
+
+Fix:
+Made loading generic by task name:
+- experiment_name taken from the current train cfg,
+- cfg filename built as f'{name}_config.py',
+- config classes loaded dynamically from the registered task name.
+
+Why this mattered:
+This prevents G1 from trying to load H1 config artifacts when resuming.
+
+
+5. Changes in scripts/train.py
+------------------------------
+File:
+/home/shuaiyyy/humanoids_repo/g1_docoupled/g1_decoupled/IL_transformer/legged_gym/legged_gym/scripts/train.py
+
+5.1 Made config/code saving task-generic
+----------------------------------------
+Problem:
+The training script was effectively saving hardcoded G1 or non-generic task
+files regardless of the selected task.
+
+Fix:
+Switched it to use:
+- task_registry.task_paths[args.task]
+- save f"{args.task}_config.py"
+- save f"{args.task}.py"
+
+Why this mattered:
+This keeps logging/export aligned with the actual selected task and makes the
+script usable beyond one hardcoded environment.
+
+
+6. Changes in on_policy_runner.py
+---------------------------------
+File:
+/home/shuaiyyy/humanoids_repo/g1_docoupled/g1_decoupled/IL_transformer/rsl_rl/rsl_rl/runners/on_policy_runner.py
+
+6.1 Removed hardcoded H1 type import from the runner
+----------------------------------------------------
+Problem:
+The runner imported H1 directly:
+
+    from legged_gym.envs.h1.h1 import H1
+
+This broke in the IL_transformer checkout because that path did not exist there.
+
+Fix:
+The H1-specific import was commented out and replaced with a generic type path.
+
+Old line was kept commented for reference.
+
+Why this mattered:
+The runner should not depend on a specific environment class just to exist.
+
+
+7. Changes in terrain.py
+------------------------
+File:
+/home/shuaiyyy/humanoids_repo/g1_docoupled/g1_decoupled/IL_transformer/legged_gym/legged_gym/utils/terrain.py
+
+This file ended up being one of the most important fixes during the full audit.
+
+7.1 Removed hardcoded H1 config import
+--------------------------------------
+Problem:
+terrain.py imported:
+
+    from legged_gym.envs.h1.h1_config import H1RoughCfg
+
+which failed because H1 was not present in this checkout.
+
+Fix:
+The H1 import was commented out and the constructor type annotation made generic:
+
+    def __init__(self, cfg, num_robots)
+
+Old line kept as comment.
+
+
+7.2 Fixed one square-terrain assumption in selected_terrain()
+-------------------------------------------------------------
+Problem:
+selected_terrain() created tiles with:
+
+    width=self.width_per_env_pixels
+    length=self.width_per_env_pixels
+
+This assumes square terrain tiles.
+
+Fix:
+Changed selected_terrain() to:
+
+    width=self.width_per_env_pixels
+    length=self.length_per_env_pixels
+
+and kept the old line commented for reference.
+
+Why this mattered:
+This is required for rectangular terrain configs like:
+- terrain_length = 18.
+- terrain_width = 4
+
+
+7.3 Fixed the real rectangular-terrain convention in make_terrain()
+-------------------------------------------------------------------
+Problem:
+Even after the previous fix, runtime still failed because the internal
+SubTerrain/height_field_raw convention in this stack is not simply:
+
+    width = width_per_env_pixels
+    length = length_per_env_pixels
+
+TWIST2 uses a different rectangular convention in its terrain utility.
+
+Reference found in:
+/home/shuaiyyy/humanoids_repo/g1_docoupled/TWIST2/legged_gym/legged_gym/gym_utils/terrain.py
+
+TWIST2 constructs terrain in make_terrain() as:
+
+    width = self.length_per_env_pixels
+    length = self.width_per_env_pixels
+
+Fix:
+Aligned IL_transformer terrain.py to that TWIST2 rectangular convention in
+make_terrain(), keeping older lines commented out for reference.
+
+Why this mattered:
+This was the fix that allowed terrain generation for your G1 rectangular terrain
+config to complete without shape mismatch.
+
+
+8. Changes in ~/.bashrc
+-----------------------
+File:
+/home/shuaiyyy/.bashrc
+
+8.1 Made Isaac Gym path export permanent
+----------------------------------------
+Added:
+
+    export PYTHONPATH="$PYTHONPATH:$HOME/isaacgym/python"
+
+Why this mattered:
+Without it, Python in your conda env could not import Isaac Gym.
+
+
+8.2 Made conda lib path export permanent
+----------------------------------------
+Added:
+
+    export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:$LD_LIBRARY_PATH"
+
+Why this mattered:
+This helps the Isaac Gym Python bindings find the conda environment’s shared
+libraries, especially libpython and related dependencies.
+
+
+9. Documentation files created/updated
+--------------------------------------
+
+9.1 NOTES.txt
+-------------
+File:
+/home/shuaiyyy/humanoids_repo/g1_docoupled/NOTES.txt
+
+Updated with short reference notes on:
+- on-policy vs off-policy,
+- OnPolicyRunner,
+- config structure,
+- JIT profiling notes,
+- code references.
+
+This file is documentation only, not used by training.
+
+
+9.2 documentation_humanplus.txt
+-------------------------------
+File:
+/home/shuaiyyy/humanoids_repo/g1_docoupled/documentation_humanplus.txt
+
+Created to record HumanPlus HST reward notes, especially:
+- implemented reward functions,
+- which rewards are active vs inactive by reward scale.
+
+This file is also documentation only.
+
+
+10. Dependency and environment changes made during testing
+----------------------------------------------------------
+
+10.1 Isaac Gym Python version mismatch was identified
+-----------------------------------------------------
+Observed issue:
+Isaac Gym build did not support Python 3.13.
+
+Resolution path:
+Use conda env `HIT` with Python 3.8-compatible Isaac Gym workflow.
+
+
+10.2 Package installs in the HIT conda env
+------------------------------------------
+Installed during the earlier setup/debug phase:
+- numpy
+- matplotlib
+- torch
+- wandb
+- ipython
+- local editable rsl_rl
+
+Also important:
+System pip installs were avoided after detecting they were writing to
+/usr/lib/python3/dist-packages instead of the conda env.
+
+
+10.3 NumPy compatibility iteration
+----------------------------------
+There was a compatibility balancing act between:
+- Isaac Gym
+- Pillow/matplotlib stack
+
+Final working direction used during the audit:
+- numpy == 1.23.5
+
+Reason:
+- Newer numpy broke Isaac Gym due to deprecated aliases like np.float.
+- Much older numpy caused other dependency issues.
+
+
+11. Runtime audit path and what each surfaced error meant
+---------------------------------------------------------
+
+This is the actual progression of failures while pushing test_env.py deeper.
+
+11.1 Missing isaacgym module
+----------------------------
+Meaning:
+PYTHONPATH did not include Isaac Gym.
+
+Resolved by:
+- exporting Isaac Gym path,
+- then making that export permanent in ~/.bashrc.
+
+
+11.2 Missing rsl_rl / IPython / other imports
+---------------------------------------------
+Meaning:
+environment dependencies in the HIT env were incomplete.
+
+Resolved by:
+- pip/conda installs in the HIT env,
+- editable install of local rsl_rl.
+
+
+11.3 Missing h1 module imports
+------------------------------
+Meaning:
+IL_transformer still had hardcoded H1 imports in runner/terrain/env package path.
+
+Resolved by:
+- commenting out H1-specific imports,
+- keeping old lines as comments for reference.
+
+
+11.4 sim_device.type attribute error
+------------------------------------
+Meaning:
+copied g1.py startup path was expecting a different sim_device representation.
+
+Resolved by:
+- standard device parsing via gymutil.parse_device_str.
+
+
+11.5 Rectangular terrain broadcast mismatch
+-------------------------------------------
+Meaning:
+terrain.py had hidden square-terrain assumptions; your G1 config uses TWIST2-like
+rectangular terrain.
+
+Resolved by:
+- aligning terrain tile creation with TWIST2’s rectangular terrain convention.
+
+
+11.6 Missing init_state.rot / lin_vel / ang_vel
+-----------------------------------------------
+Meaning:
+G1 config did not define all root-state fields expected by the copied env.
+
+Resolved by:
+- adding those fields explicitly.
+
+
+11.7 Missing noise_scales.orn
+-----------------------------
+Meaning:
+observation noise config did not match the copied H1-style observation structure.
+
+Resolved by:
+- adding orn = 0.05 to noise scales.
+
+
+11.8 Final current blocker: target_jt trajectory dimension mismatch
+-------------------------------------------------------------------
+Meaning:
+The environment now gets far enough to initialize target joint trajectories.
+
+Current configured file:
+
+/home/shuaiyyy/humanoids_repo/g1_docoupled/g1_decoupled/IL_transformer/legged_gym/data/ACCAD_walk_10fps.npy
+
+Actual shape:
+- (77, 19)
+
+But G1 expects:
+- 29 DOFs
+
+Failure site:
+- g1.py _init_target_jt()
+- human.py load_target_jt()
+
+Specifically:
+the loaded trajectory tensor cannot be offset by the 29-DOF default pose because
+its last dimension is only 19.
+
+This is now the main unresolved blocker.
+
+
+12. What was intentionally not changed
+--------------------------------------
+
+12.1 I did not redesign the reward structure
+--------------------------------------------
+Examples not changed:
+- tracking_lin_vel
+- tracking_ang_vel
+- target_jt
+
+These were left intact.
+
+
+12.2 I did not split target_jt into upper-body-only tracking
+------------------------------------------------------------
+Current code still tracks all DOFs in target_jt.
+
+No lower-body/upper-body masking was implemented in this audit.
+
+
+12.3 I did not change the overall training algorithm
+----------------------------------------------------
+PPO / runner / transformer policy setup was not redesigned here.
+
+Edits in runner/task registry were only compatibility/registration fixes.
+
+
+12.4 I did not fabricate a 29-DOF G1 trajectory file
+-----------------------------------------------------
+The final blocker is still unresolved because the correct next fix is data-side:
+
+either:
+- provide a G1 29-DOF retargeted motion file,
+
+or:
+- change the target_jt logic to use only the subset you want to imitate.
+
+
+13. Current best interpretation of the migration state
+------------------------------------------------------
+The migration is now past the generic codebase wiring stage.
+
+The environment stack is substantially more integrated than before:
+- imports work,
+- task registration works,
+- asset loads,
+- terrain works,
+- env construction works,
+- buffers initialize.
+
+The next step is no longer "fix the framework".
+
+The next step is one of these:
+
+1. supply a 29-DOF G1 trajectory file,
+2. retarget the existing 19-DOF file to G1,
+3. change target_jt logic to upper-body-only or partial-DOF tracking.
+
+
+14. Practical conclusion
+------------------------
+The edits made so far were necessary compatibility repairs.
+
+They moved the failure point from:
+- missing imports,
+- stale H1 assumptions,
+- broken startup code,
+- terrain shape bugs,
+- config field mismatches
+
+to:
+- the first real semantic G1 problem: trajectory dimensionality.
+
+That is a good stopping point for the codebase audit phase because it means the
+remaining work is now task/data design work, not blind infrastructure repair.
+
+
+15. Detailed explanation of the current trajectory blocker
+----------------------------------------------------------
+
+This is the current runtime blocker:
+
+- [g1.py](/home/shuaiyyy/humanoids_repo/g1_docoupled/g1_decoupled/IL_transformer/legged_gym/legged_gym/envs/g1/g1.py#L143) loads `self.cfg.human.filename`
+- [human.py](/home/shuaiyyy/humanoids_repo/g1_docoupled/g1_decoupled/IL_transformer/legged_gym/legged_gym/utils/human.py#L8) adds the loaded motion to the G1 default pose offset
+- but the only motion file currently present is:
+  [ACCAD_walk_10fps.npy](/home/shuaiyyy/humanoids_repo/g1_docoupled/g1_decoupled/IL_transformer/legged_gym/data/ACCAD_walk_10fps.npy)
+- that file has shape:
+  `(77, 19)`
+
+15.1 What the code is trying to do
+----------------------------------
+
+The copied G1 environment assumes the trajectory file contains one joint target
+vector per frame, and that the size of that vector matches the robot DOF count.
+
+The relevant flow is:
+
+1. In `g1.py`, `_init_target_jt()` calls:
+
+       load_target_jt(self.device, self.cfg.human.filename, self.default_dof_pos)
+
+2. In `human.py`, `load_target_jt()` does:
+
+       one_target_jt = np.load(f"data/{file}").astype(np.float32)
+       one_target_jt = torch.from_numpy(one_target_jt).to(device)
+       target_jt = one_target_jt.unsqueeze(0)
+       target_jt += offset
+
+3. Here, `offset` is `self.default_dof_pos`, which in G1 has one value per DOF.
+
+So the code expects:
+
+- trajectory shape = `(num_frames, num_dofs)`
+- offset shape = `(1, num_dofs)` after broadcasting
+
+For your G1 config:
+- `num_dofs = 29`
+
+So the code expects:
+- `(num_frames, 29)`
+
+15.2 What is actually present
+-----------------------------
+
+The only available file is:
+- `ACCAD_walk_10fps.npy`
+
+Its shape is:
+- `(77, 19)`
+
+That means:
+- 77 frames
+- 19 joint values per frame
+
+This is compatible with an H1-sized or H1-like target layout, not with G1’s
+29-DOF layout.
+
+15.3 Why the exact runtime error happens
+----------------------------------------
+
+When `human.py` executes:
+
+    target_jt += offset
+
+the tensor shapes are effectively:
+
+- `target_jt`: `(1, 77, 19)`
+- `offset`: `(1, 29)`
+
+Broadcasting cannot align 19 with 29 on the joint dimension.
+
+So PyTorch raises:
+
+    RuntimeError: The size of tensor a (19) must match the size of tensor b (29)
+
+This is not a random runtime bug. It is a direct statement that the motion data
+and the robot joint layout do not match.
+
+15.4 What this means semantically
+---------------------------------
+
+This tells us the copied environment logic is now functioning far enough to reach
+the imitation data path, but the imitation data is still for a different robot
+or a different joint set.
+
+In practical terms:
+
+- G1 environment side says:
+  "I have 29 actuated joints and I want a 29-value target vector each frame."
+
+- Motion file side says:
+  "I only provide 19 target joint values per frame."
+
+So the environment does not know how to map the 19-value motion into the 29-DOF
+G1 body by itself.
+
+15.5 Why this is the first real G1-specific blocker
+---------------------------------------------------
+
+Everything before this point was codebase plumbing:
+- imports
+- task registration
+- device parsing
+- terrain generation
+- asset loading
+- config field mismatches
+
+This blocker is different.
+
+It is the first place where the code is asking:
+
+"What exact motion representation is G1 supposed to imitate?"
+
+and the current data cannot answer that, because it is not in G1 joint space.
+
+15.6 What does not solve this problem
+-------------------------------------
+
+The following will not solve it:
+
+- changing PPO hyperparameters
+- changing runner settings
+- changing reward scales alone
+- changing terrain settings
+- changing Isaac Gym imports
+
+Those are unrelated to the dimensional mismatch.
+
+15.7 What would solve this problem
+----------------------------------
+
+There are only a few valid directions:
+
+1. Use a real G1 retargeted motion file
+   The cleanest solution.
+   The `.npy` file should have one frame per row and 29 joint targets per frame.
+
+2. Retarget the existing 19-DOF motion to G1
+   This means creating a mapping from the 19-joint source representation to the
+   29-joint G1 representation.
+   This is not automatic in the current code.
+
+3. Change the imitation target to only use a subset of G1 joints
+   For example, if your goal is upper-body tracking only, you could:
+   - keep lower-body joints outside target_jt tracking,
+   - define a smaller target vector,
+   - add indexing/masking logic in `_reward_target_jt()` and in observation assembly.
+
+4. Pad the 19-DOF target to 29 DOFs with a defined mapping
+   This is only valid if you know exactly which 19 joints correspond to which 29
+   G1 joints and what the missing 10 joints should do.
+   Blind zero-padding would run, but it would not be semantically correct unless
+   you define the mapping carefully.
+
+15.8 Why this matters for your intended design
+----------------------------------------------
+
+You said your long-term goal is:
+- lower body for stability
+- upper body for imitation learning
+
+This blocker is exactly where that decision becomes concrete.
+
+Right now the code assumes:
+- full target_jt for all 29 DOFs
+
+But your current file only gives:
+- 19 target values
+
+So before continuing, you will eventually need to decide:
+
+- full-body imitation on G1 using 29-DOF retargeted data,
+or
+- partial-body imitation using explicit joint subset logic.
+
+15.9 Short version
+------------------
+
+The current trajectory file is not in G1 joint space.
+
+The environment now works well enough to ask for a 29-DOF G1 motion target,
+but the file you give it still contains only 19 values per frame.
+
+So the remaining problem is no longer framework migration.
+It is trajectory representation mismatch.

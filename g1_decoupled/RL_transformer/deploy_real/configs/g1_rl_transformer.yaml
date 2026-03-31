@@ -1,0 +1,59 @@
+sim_dt: 0.001
+policy_frequency: 20
+record_video: false
+
+device: "cuda"
+xml_path: "../../assets/g1/g1_sim2sim_29dof.xml"
+policy_path: "../legged_gym/logs/rough_g1/g1_debug/exported/policies/policy_1.pt"
+motion_file: "../legged_gym/motion_data_configs/twist2_dataset.yaml"
+
+obs_context_len: 8
+num_obs_single: 124
+num_actions: 29
+motion_frequency: 30
+target_delay: 0.0
+resample_motion_on_end: true
+max_cached_motions: 64
+
+command_lin_vel_x: 0.9
+command_lin_vel_y: 0.0
+command_heading: 0.0
+heading_command: true
+
+obs_scales:
+  orn: 1.0
+  ang_vel: 0.25
+  dof_pos: 1.0
+  dof_vel: 0.05
+
+commands_scale: [1.0, 1.0, 1.0, 1.0]
+
+default_angles: [-0.2, 0.0, 0.0, 0.4, -0.2, 0.0,
+                 -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,
+                 0.0, 0.0, 0.0,
+                 0.0, 0.4, 0.0, 1.2, 0.0, 0.0, 0.0,
+                 0.0, -0.4, 0.0, 1.2, 0.0, 0.0, 0.0]
+
+kps: [100, 100, 100, 150, 40, 40,
+      100, 100, 100, 150, 40, 40,
+      150, 150, 150,
+      40, 40, 40, 40, 40, 40, 40,
+      40, 40, 40, 40, 40, 40, 40]
+
+kds: [2, 2, 2, 4, 2, 2,
+      2, 2, 2, 4, 2, 2,
+      4, 4, 4,
+      5, 5, 5, 5, 5, 5, 5,
+      5, 5, 5, 5, 5, 5, 5]
+
+torque_limits: [100, 100, 100, 150, 40, 40,
+                100, 100, 100, 150, 40, 40,
+                150, 150, 150,
+                40, 40, 40, 40, 40, 40, 40,
+                40, 40, 40, 40, 40, 40, 40]
+
+action_scale: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5,
+               0.5, 0.5, 0.5, 0.5, 0.5, 0.5,
+               0.5, 0.5, 0.5,
+               0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5,
+               0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
