@@ -2,7 +2,6 @@ TWIST2/
 humanplus/
 .vscode/
 g1_decoupled/project.txt
-g1_decoupled/README.md
 .codex
 
 # Python build/runtime artifacts
